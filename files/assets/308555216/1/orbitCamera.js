@@ -4,6 +4,8 @@
 // Touch: un dito = orbit, due dita = pinch zoom + pan
 // Tasto F = torna alla vista iniziale
 // Orbit, pan e zoom si possono attivare o disattivare singolarmente.
+// Parallasse (opzionale): la camera orbita leggermente seguendo la posizione
+// del mouse sul canvas, con partenza e arrivo morbidi e limiti dolci ai bordi.
 var OrbitCamera = pc.createScript('orbitCamera');
 
 OrbitCamera.attributes.add('enableOrbit', { type: 'boolean', default: true, title: 'Orbit attivo' });
@@ -18,6 +20,32 @@ OrbitCamera.attributes.add('maxDistance', { type: 'number', default: 80, title: 
 OrbitCamera.attributes.add('minPitch', { type: 'number', default: -89, min: -89.9, max: 0, title: 'Pitch minimo' });
 OrbitCamera.attributes.add('maxPitch', { type: 'number', default: 89, min: 0, max: 89.9, title: 'Pitch massimo' });
 OrbitCamera.attributes.add('damping', { type: 'number', default: 12, min: 1, max: 60, title: 'Morbidezza (alto = piu rapido)' });
+
+OrbitCamera.attributes.add('parallax', {
+    type: 'json', title: 'Parallasse col mouse',
+    schema: [
+        { name: 'enabled', type: 'boolean', default: false, title: 'Attivo' },
+        { name: 'yaw', type: 'number', default: 8, min: 0, max: 90, precision: 1, title: 'Orbita destra/sinistra (gradi max)' },
+        { name: 'pitch', type: 'number', default: 3, min: 0, max: 60, precision: 1, title: 'Orbita alto/basso (gradi max)' },
+        { name: 'smoothTime', type: 'number', default: 0.6, min: 0.02, max: 5, precision: 2, title: 'Morbidezza (secondi per raggiungere)' },
+        { name: 'edgeSoftness', type: 'number', default: 1, min: 0, max: 1, precision: 2, title: 'Frenata ai bordi (0 = lineare, 1 = molto morbida)' },
+        { name: 'invertX', type: 'boolean', default: false, title: 'Inverti destra/sinistra' },
+        { name: 'invertY', type: 'boolean', default: false, title: 'Inverti alto/basso' },
+        { name: 'recenter', type: 'boolean', default: true, title: 'Torna al centro quando il mouse esce' }
+    ]
+});
+
+// Avvicinamento morbido (accelera e frena), come SmoothDamp
+OrbitCamera.smoothDamp = function (current, target, state, key, smoothTime, dt) {
+    smoothTime = Math.max(0.0001, smoothTime);
+    var omega = 2 / smoothTime;
+    var x = omega * dt;
+    var exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    var change = current - target;
+    var temp = (state[key] + omega * change) * dt;
+    state[key] = (state[key] - omega * temp) * exp;
+    return target + (change + temp) * exp;
+};
 
 OrbitCamera.prototype.initialize = function () {
     // Stato iniziale ricavato dalla posizione attuale della camera
@@ -40,6 +68,13 @@ OrbitCamera.prototype.initialize = function () {
     this.curYaw = this.targetYaw;
     this.curPitch = this.targetPitch;
 
+    // Parallasse: posizione del mouse normalizzata (-1..1) e offset attuali
+    this.pxMouse = 0;
+    this.pyMouse = 0;
+    this.pxYaw = 0;
+    this.pxPitch = 0;
+    this.pxVel = { yaw: 0, pitch: 0 };
+
     this.quat = new pc.Quat();
     this.vec = new pc.Vec3();
     this.right = new pc.Vec3();
@@ -61,6 +96,8 @@ OrbitCamera.prototype.initialize = function () {
     this._wheel = this.onWheel.bind(this);
     this._menu = function (e) { e.preventDefault(); };
     this._key = this.onKey.bind(this);
+    this._hover = this.onHover.bind(this);
+    this._leave = this.onLeave.bind(this);
 
     canvas.addEventListener('pointerdown', this._down);
     canvas.addEventListener('pointermove', this._move);
@@ -69,6 +106,8 @@ OrbitCamera.prototype.initialize = function () {
     canvas.addEventListener('wheel', this._wheel, { passive: false });
     canvas.addEventListener('contextmenu', this._menu);
     window.addEventListener('keydown', this._key);
+    window.addEventListener('pointermove', this._hover);
+    document.addEventListener('mouseout', this._leave);
 
     this.on('destroy', function () {
         canvas.removeEventListener('pointerdown', this._down);
@@ -78,6 +117,8 @@ OrbitCamera.prototype.initialize = function () {
         canvas.removeEventListener('wheel', this._wheel);
         canvas.removeEventListener('contextmenu', this._menu);
         window.removeEventListener('keydown', this._key);
+        window.removeEventListener('pointermove', this._hover);
+        document.removeEventListener('mouseout', this._leave);
     }, this);
 
     this.applyTransform();
@@ -114,6 +155,27 @@ OrbitCamera.prototype.onPointerUp = function (e) {
     delete this.pointers[e.pointerId];
     this.pointerCount = Object.keys(this.pointers).length;
     if (this.pointerCount === 2) this.startPinch();
+};
+
+// Posizione del mouse per la parallasse: -1 (bordo sinistro/alto) .. +1 (destro/basso)
+OrbitCamera.prototype.onHover = function (e) {
+    var rect = this.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    var nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    var ny = ((e.clientY - rect.top) / rect.height) * 2 - 1;
+    if (nx < -1 || nx > 1 || ny < -1 || ny > 1) {
+        if (this.parallax.recenter) { this.pxMouse = 0; this.pyMouse = 0; }
+        return;
+    }
+    this.pxMouse = nx;
+    this.pyMouse = ny;
+};
+
+OrbitCamera.prototype.onLeave = function (e) {
+    if (!e.relatedTarget && this.parallax.recenter) {
+        this.pxMouse = 0;
+        this.pyMouse = 0;
+    }
 };
 
 OrbitCamera.prototype.onWheel = function (e) {
@@ -182,6 +244,30 @@ OrbitCamera.prototype.resetView = function () {
     this.targetPitch = this.home.pitch;
 };
 
+// ---------- Parallasse ----------
+
+// Curva dei bordi: con morbidezza 1 il movimento rallenta avvicinandosi al bordo
+// (seno: pendenza zero a +-1), con 0 e' lineare.
+OrbitCamera.edgeCurve = function (n, softness) {
+    n = pc.math.clamp(n, -1, 1);
+    var soft = Math.sin(n * Math.PI * 0.5);
+    return n + (soft - n) * softness;
+};
+
+OrbitCamera.prototype.updateParallax = function (dt) {
+    var px = this.parallax;
+    var tYaw = 0, tPitch = 0;
+    if (px.enabled) {
+        var sx = px.invertX ? -1 : 1;
+        var sy = px.invertY ? -1 : 1;
+        // Mouse a destra: la camera gira verso destra; mouse in alto: la camera sale
+        tYaw = OrbitCamera.edgeCurve(this.pxMouse, px.edgeSoftness) * px.yaw * sx;
+        tPitch = OrbitCamera.edgeCurve(this.pyMouse, px.edgeSoftness) * px.pitch * sy;
+    }
+    this.pxYaw = OrbitCamera.smoothDamp(this.pxYaw, tYaw, this.pxVel, 'yaw', px.smoothTime, dt);
+    this.pxPitch = OrbitCamera.smoothDamp(this.pxPitch, tPitch, this.pxVel, 'pitch', px.smoothTime, dt);
+};
+
 // ---------- Update ----------
 
 OrbitCamera.prototype.update = function (dt) {
@@ -190,11 +276,14 @@ OrbitCamera.prototype.update = function (dt) {
     this.curPitch += (this.targetPitch - this.curPitch) * k;
     this.curDistance += (this.targetDistance - this.curDistance) * k;
     this.curPivot.lerp(this.curPivot, this.targetPivot, k);
+    this.updateParallax(dt);
     this.applyTransform();
 };
 
 OrbitCamera.prototype.applyTransform = function () {
-    this.quat.setFromEulerAngles(this.curPitch, this.curYaw, 0);
+    var yaw = this.curYaw + (this.pxYaw || 0);
+    var pitch = pc.math.clamp(this.curPitch + (this.pxPitch || 0), this.minPitch, this.maxPitch);
+    this.quat.setFromEulerAngles(pitch, yaw, 0);
     this.vec.set(0, 0, this.curDistance);
     this.quat.transformVector(this.vec, this.vec);
     this.vec.add(this.curPivot);

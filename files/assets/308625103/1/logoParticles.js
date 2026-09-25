@@ -1,11 +1,16 @@
 // logoParticles.js
 // Riempie il volume di una geometria (es. il logo) con qualche migliaio di palline.
 // La geometria originale viene nascosta: restano solo le particelle.
-// Al passaggio del mouse le palline vicine vengono mosse come da un vento:
-// una turbolenza (noise 3D animato) che cresce vicino al cursore, trascinata
-// nella direzione in cui muovi il mouse, con un bordo irregolare.
-// Le palline mosse diventano rosse luminose; quando il mouse si allontana
-// tornano al loro posto con un ritorno elastico.
+//
+// Interazione guidata dalla VELOCITA del mouse:
+//  - mouse fermo o lento (sotto la "zona morta"): nessuna forza
+//  - passata veloce: le palline vicine ricevono un colpo nella direzione del
+//    movimento (+ un po' via dal cursore) e si "agitano": una turbolenza
+//    le fa vibrare per un po', poi la frenesia si spegne da sola
+// Sopra la zona morta la forza cresce con una potenza della velocita
+// (default: al quadrato), cosi i gesti rapidi contano molto piu di quelli medi.
+// Le palline mosse diventano del colore "caldo" luminoso; una molla le riporta
+// sempre al loro posto con un piccolo rimbalzo.
 // Shader: logoParticles.vert / logoParticles.frag (cartella shaders).
 var LogoParticles = pc.createScript('logoParticles');
 
@@ -31,17 +36,39 @@ LogoParticles.attributes.add('force', {
     type: 'json', title: 'Zona del mouse',
     schema: [
         { name: 'radius', type: 'number', default: 1.6, min: 0.05, max: 10, precision: 2, title: 'Raggio influenza' },
+        { name: 'radiusBySpeed', type: 'number', default: 0.5, min: 0, max: 1, precision: 2, title: 'Raggio cresce con la velocita (0 = fisso)' },
         { name: 'falloff', type: 'number', default: 1.5, min: 0.1, max: 8, precision: 2, title: 'Decadimento (alto = piu concentrato sulla punta)' },
         { name: 'edgeNoise', type: 'number', default: 0.5, min: 0, max: 1, precision: 2, title: 'Bordo irregolare (0 = cerchio)' },
         { name: 'edgeScale', type: 'number', default: 1.2, min: 0.05, max: 10, precision: 2, title: 'Scala irregolarita bordo' },
-        { name: 'strength', type: 'number', default: 0.3, min: 0, max: 10, precision: 2, title: 'Spinta radiale (via dal cursore)' },
-        { name: 'depth', type: 'number', default: 0.35, min: -2, max: 2, precision: 2, title: 'Spinta in profondita (+ verso la camera)' },
+        { name: 'strength', type: 'number', default: 0.3, min: 0, max: 10, precision: 2, title: 'Colpo radiale (via dal cursore)' },
+        { name: 'depth', type: 'number', default: 0.35, min: -2, max: 2, precision: 2, title: 'Colpo in profondita (+ verso la camera)' },
         { name: 'randomness', type: 'number', default: 0.25, min: 0, max: 1, precision: 2, title: 'Disordine per pallina' }
     ]
 });
 
+LogoParticles.attributes.add('wind', {
+    type: 'json', title: 'Velocita del mouse',
+    schema: [
+        { name: 'amount', type: 'number', default: 1.5, min: 0, max: 10, precision: 2, title: 'Colpo nella direzione del movimento' },
+        { name: 'deadZone', type: 'number', default: 3, min: 0, max: 50, precision: 2, title: 'Zona morta (sotto questa velocita nessun effetto)' },
+        { name: 'max', type: 'number', default: 14, min: 0.1, max: 80, precision: 2, title: 'Velocita di riferimento (effetto 1x)' },
+        { name: 'curve', type: 'number', default: 2, min: 0.5, max: 4, precision: 2, title: 'Sensibilita alla velocita (alto = i gesti medi contano meno)' },
+        { name: 'cap', type: 'number', default: 3, min: 0.5, max: 10, precision: 2, title: 'Limite effetto per gesti velocissimi' },
+        { name: 'smoothing', type: 'number', default: 6, min: 0.5, max: 30, precision: 1, title: 'Morbidezza (basso = l\'effetto dura di piu dopo il gesto)' },
+        { name: 'gusts', type: 'number', default: 0.4, min: 0, max: 1, precision: 2, title: 'Raffiche (variazione tra palline)' }
+    ]
+});
+
+LogoParticles.attributes.add('frenzy', {
+    type: 'json', title: 'Frenesia',
+    schema: [
+        { name: 'buildUp', type: 'number', default: 4, min: 0, max: 30, precision: 2, title: 'Accumulo (quanto si agitano a ogni passata)' },
+        { name: 'duration', type: 'number', default: 1.0, min: 0.05, max: 10, precision: 2, title: 'Durata agitazione (secondi)' }
+    ]
+});
+
 LogoParticles.attributes.add('turbulence', {
-    type: 'json', title: 'Turbolenza',
+    type: 'json', title: 'Turbolenza (agitazione)',
     schema: [
         { name: 'amplitude', type: 'number', default: 1.0, min: 0, max: 10, precision: 2, title: 'Ampiezza' },
         { name: 'scale', type: 'number', default: 0.8, min: 0.01, max: 10, precision: 2, title: 'Scala (alto = vortici piu piccoli)' },
@@ -50,22 +77,11 @@ LogoParticles.attributes.add('turbulence', {
     ]
 });
 
-LogoParticles.attributes.add('wind', {
-    type: 'json', title: 'Vento del mouse',
-    schema: [
-        { name: 'amount', type: 'number', default: 0.35, min: 0, max: 5, precision: 2, title: 'Quanto trascina il movimento del mouse' },
-        { name: 'max', type: 'number', default: 2.5, min: 0, max: 20, precision: 2, title: 'Vento massimo' },
-        { name: 'smoothing', type: 'number', default: 6, min: 0.5, max: 30, precision: 1, title: 'Morbidezza (basso = raffiche lunghe)' },
-        { name: 'gusts', type: 'number', default: 0.4, min: 0, max: 1, precision: 2, title: 'Raffiche (variazione del vento)' }
-    ]
-});
-
 LogoParticles.attributes.add('spring', {
     type: 'json', title: 'Ritorno elastico',
     schema: [
         { name: 'stiffness', type: 'number', default: 60, min: 1, max: 600, precision: 0, title: 'Rigidita' },
-        { name: 'bounce', type: 'number', default: 0.55, min: 0, max: 0.95, precision: 2, title: 'Rimbalzo (0-1)' },
-        { name: 'pushStiffness', type: 'number', default: 40, min: 1, max: 1000, precision: 0, title: 'Reattivita al vento' }
+        { name: 'bounce', type: 'number', default: 0.55, min: 0, max: 0.95, precision: 2, title: 'Rimbalzo (0-1)' }
     ]
 });
 
@@ -84,6 +100,13 @@ LogoParticles.attributes.add('look', {
         { name: 'glossiness', type: 'number', default: 24, min: 1, max: 256, precision: 0, title: 'Lucidita' }
     ]
 });
+
+// Scale interne: trasformano i parametri in forze (accelerazioni).
+// Il cursore passa sopra una pallina per pochi centesimi di secondo,
+// quindi il colpo deve essere forte per farla volare.
+LogoParticles.KICK_FORCE = 400;
+LogoParticles.TURB_FORCE = 60;
+LogoParticles.AGIT_RATE = 4;
 
 // ---------- Numeri casuali ripetibili ----------
 
@@ -142,7 +165,8 @@ LogoParticles.prototype.initialize = function () {
     this.mouseWorld = new pc.Vec3();
     this.prevMouseWorld = new pc.Vec3();
     this.hasPrevMouse = false;
-    this.windVel = new pc.Vec3();
+    this.moveDir = new pc.Vec3();     // direzione del movimento del mouse (smussata)
+    this.speedNorm = 0;               // fattore di velocita: 0 = fermo, 1 = velocita di riferimento
     this.u3 = {};
 
     this.readSourceTriangles();
@@ -216,6 +240,7 @@ LogoParticles.prototype.readSourceTriangles = function () {
         this.tris = new Float32Array(0);
         this.bmin = [0, 0, 0];
         this.bmax = [0, 0, 0];
+        this.center = new pc.Vec3();
         return;
     }
     var wt = src.getWorldTransform();
@@ -317,9 +342,10 @@ LogoParticles.prototype.buildParticles = function () {
     this.count = n;
     this.rest = new Float32Array(rest);
     this.pos = new Float32Array(rest);
-    this.offset = new Float32Array(n * 3);   // spostamento attuale (molla)
+    this.offset = new Float32Array(n * 3);   // spostamento attuale
     this.vel = new Float32Array(n * 3);
     this.dirJit = new Float32Array(n * 3);   // disordine per pallina
+    this.agit = new Float32Array(n);         // agitazione 0..1 (frenesia)
     this.heat = new Float32Array(n);
     this.data = new Float32Array(n * 3);     // tono, calore, dimensione
 
@@ -363,13 +389,16 @@ LogoParticles.prototype.buildMaterial = function () {
     this.material.update();
 };
 
-// ---------- Vento del mouse ----------
+// ---------- Velocita del mouse ----------
 
-// Segue il punto del mouse sul piano del logo e ne ricava la velocita (= vento)
-LogoParticles.prototype.updateWind = function (dt, active) {
+// Segue il punto del mouse sul piano del logo e ne ricava velocita e direzione.
+// speedNorm = ((velocita - zona morta) / velocita di riferimento) ^ sensibilita,
+// con un limite. Sotto la zona morta vale 0: i movimenti lenti non fanno nulla.
+// Si smorza nel tempo: quando ti fermi scende a zero.
+LogoParticles.prototype.updateMouseSpeed = function (dt, active) {
     var wd = this.wind;
-    var target = LogoParticles._tmpV || (LogoParticles._tmpV = new pc.Vec3());
-    target.set(0, 0, 0);
+    var targetSpeed = 0;
+    var tmp = LogoParticles._tmpV || (LogoParticles._tmpV = new pc.Vec3());
 
     if (active) {
         // Intersezione del raggio col piano del logo, rivolto verso la camera
@@ -380,9 +409,18 @@ LogoParticles.prototype.updateWind = function (dt, active) {
             t /= denom;
             this.mouseWorld.copy(this.rayDir).mulScalar(t).add(this.rayStart);
             if (this.hasPrevMouse && dt > 0) {
-                target.sub2(this.mouseWorld, this.prevMouseWorld).mulScalar(wd.amount / dt);
-                var len = target.length();
-                if (len > wd.max) target.mulScalar(wd.max / len);
+                tmp.sub2(this.mouseWorld, this.prevMouseWorld);
+                var dist = tmp.length();
+                if (dist > 1e-6) {
+                    var speed = dist / dt;
+                    var over = Math.max(0, speed - (wd.deadZone || 0));
+                    var ratio = over / Math.max(wd.max, 0.01);
+                    targetSpeed = Math.min(Math.pow(ratio, wd.curve), wd.cap);
+                    tmp.mulScalar(1 / dist);
+                    // la direzione segue il movimento
+                    var kd = 1 - Math.exp(-20 * dt);
+                    this.moveDir.lerp(this.moveDir, tmp, kd);
+                }
             }
             this.prevMouseWorld.copy(this.mouseWorld);
             this.hasPrevMouse = true;
@@ -391,8 +429,9 @@ LogoParticles.prototype.updateWind = function (dt, active) {
         this.hasPrevMouse = false;
     }
 
-    var k = 1 - Math.exp(-wd.smoothing * dt);
-    this.windVel.lerp(this.windVel, target, k);
+    // Sale subito, scende con la morbidezza impostata
+    if (targetSpeed > this.speedNorm) this.speedNorm = targetSpeed;
+    else this.speedNorm += (targetSpeed - this.speedNorm) * (1 - Math.exp(-wd.smoothing * dt));
 };
 
 // ---------- Update ----------
@@ -417,42 +456,50 @@ LogoParticles.prototype.update = function (dt) {
         cam.screenToWorld(this.mouseX, this.mouseY, cam.farClip, this.rayEnd);
         this.rayDir.sub2(this.rayEnd, this.rayStart).normalize();
     }
-    this.updateWind(dt, active);
+    this.updateMouseSpeed(dt, active);
 
-    var f = this.force, tb = this.turbulence, wd = this.wind, sp = this.spring, look = this.look;
-    var R = f.radius;
+    var f = this.force, tb = this.turbulence, wd = this.wind, fr = this.frenzy, sp = this.spring, look = this.look;
+    var sN = this.speedNorm;
+    var hitting = active && sN > 0.001;
+
+    // Il raggio d'influenza cresce con la velocita (fino alla velocita di riferimento)
+    var sR = Math.min(sN, 1);
+    var R = f.radius * (1 - f.radiusBySpeed + f.radiusBySpeed * sR);
     var Rmax = R * (1 + f.edgeNoise);
     var Rmax2 = Rmax * Rmax;
     var ox = this.rayStart.x, oy = this.rayStart.y, oz = this.rayStart.z;
     var dx = this.rayDir.x, dy = this.rayDir.y, dz = this.rayDir.z;
     var depth = f.depth;
 
-    var tScale = tb.scale, tAmp = tb.amplitude;
+    var tScale = tb.scale, tAmp = tb.amplitude * LogoParticles.TURB_FORCE;
     var tt = this.time * tb.speed;
     var oct = Math.max(1, Math.round(tb.octaves));
     var eScale = f.edgeScale, eAmt = f.edgeNoise;
-    var wx = this.windVel.x, wy = this.windVel.y, wz = this.windVel.z;
-    var gusts = wd.gusts;
+    var mdx = this.moveDir.x, mdy = this.moveDir.y, mdz = this.moveDir.z;
+    var windAmt = wd.amount, gusts = wd.gusts;
+    var kickBase = sN * LogoParticles.KICK_FORCE;
     var N3 = LogoParticles.noise3, F3 = LogoParticles.fbm3;
 
-    var kRet = sp.stiffness, cRet = 2 * Math.sqrt(kRet) * (1 - sp.bounce);
-    var kPush = sp.pushStiffness, cPush = 2 * Math.sqrt(kPush);
+    var buildUp = fr.buildUp * LogoParticles.AGIT_RATE * sN * dt;
+    var agitDecay = Math.exp(-dt / Math.max(fr.duration, 0.01));
+
+    var k = sp.stiffness, c = 2 * Math.sqrt(k) * (1 - sp.bounce);
     var steps = Math.max(1, Math.ceil(dt / (1 / 120)));
     var h = dt / steps;
     var coolK = 1 - Math.exp(-look.coolSpeed * dt);
     var heatRange = look.heatRange;
 
     var rest = this.rest, off = this.offset, vel = this.vel, pos = this.pos;
-    var jit = this.dirJit, heat = this.heat, data = this.data;
+    var jit = this.dirJit, agit = this.agit, heat = this.heat, data = this.data;
     var rnd = f.randomness;
 
     for (var i = 0; i < this.count; i++) {
         var i3 = i * 3;
         var rx = rest[i3], ry = rest[i3 + 1], rz = rest[i3 + 2];
-        var tx = 0, ty = 0, tz = 0, pushing = false;
+        var fx = 0, fy = 0, fz = 0;
 
-        if (active) {
-            // Distanza dalla linea del mouse (il raggio che parte dalla camera)
+        // Colpo del mouse: solo se il mouse si sta muovendo abbastanza veloce
+        if (hitting) {
             var vx = rx - ox, vy = ry - oy, vz = rz - oz;
             var t = vx * dx + vy * dy + vz * dz;
             var px = vx - dx * t, py = vy - dy * t, pz = vz - dz * t;
@@ -466,30 +513,37 @@ LogoParticles.prototype.update = function (dt) {
                     var x = 1 - d / Rloc;
                     var w = Math.pow(x * x * (3 - 2 * x), f.falloff);
                     var inv = d > 1e-5 ? 1 / d : 0;
+                    var g = 1 + (jit[i3] * 0.5 + jit[i3 + 1] * 0.5) * gusts;
+                    var kick = kickBase * w;
 
-                    // Turbolenza: un campo di noise diverso per ogni asse
-                    var sxn = rx * tScale, syn = ry * tScale, szn = rz * tScale;
-                    var nx = F3(sxn + tt, syn, szn, oct);
-                    var ny = F3(sxn + 31.7, syn + tt, szn, oct);
-                    var nz = F3(sxn, syn - 17.9, szn + tt, oct);
+                    fx = (mdx * windAmt * g + px * inv * f.strength + jit[i3] * rnd - dx * depth) * kick;
+                    fy = (mdy * windAmt * g + py * inv * f.strength + jit[i3 + 1] * rnd - dy * depth) * kick;
+                    fz = (mdz * windAmt * g + pz * inv * f.strength + jit[i3 + 2] * rnd - dz * depth) * kick;
 
-                    // Raffiche: il vento varia da pallina a pallina
-                    var g = 1 + nx * gusts;
-
-                    tx = (nx * tAmp + wx * g + px * inv * f.strength + jit[i3] * rnd - dx * depth) * w;
-                    ty = (ny * tAmp + wy * g + py * inv * f.strength + jit[i3 + 1] * rnd - dy * depth) * w;
-                    tz = (nz * tAmp + wz * g + pz * inv * f.strength + jit[i3 + 2] * rnd - dz * depth) * w;
-                    pushing = true;
+                    // Frenesia: ogni passata veloce aumenta l'agitazione
+                    agit[i] = Math.min(1, agit[i] + buildUp * w);
                 }
             }
         }
 
-        var k = pushing ? kPush : kRet;
-        var c = pushing ? cPush : cRet;
+        // Agitazione: turbolenza che con
+        
+        //tinua per un po' e poi si spegne
+        agit[i] *= agitDecay;
+        var a = agit[i];
+        if (a > 0.002) {
+            var sxn = rx * tScale, syn = ry * tScale, szn = rz * tScale;
+            var ta = tAmp * a;
+            fx += F3(sxn + tt, syn, szn, oct) * ta;
+            fy += F3(sxn + 31.7, syn + tt, szn, oct) * ta;
+            fz += F3(sxn, syn - 17.9, szn + tt, oct) * ta;
+        }
+
+        // Molla verso il posto di riposo + forze del mouse
         for (var s = 0; s < steps; s++) {
-            vel[i3] += (k * (tx - off[i3]) - c * vel[i3]) * h;
-            vel[i3 + 1] += (k * (ty - off[i3 + 1]) - c * vel[i3 + 1]) * h;
-            vel[i3 + 2] += (k * (tz - off[i3 + 2]) - c * vel[i3 + 2]) * h;
+            vel[i3] += (fx - k * off[i3] - c * vel[i3]) * h;
+            vel[i3 + 1] += (fy - k * off[i3 + 1] - c * vel[i3 + 1]) * h;
+            vel[i3 + 2] += (fz - k * off[i3 + 2] - c * vel[i3 + 2]) * h;
             off[i3] += vel[i3] * h;
             off[i3 + 1] += vel[i3 + 1] * h;
             off[i3 + 2] += vel[i3 + 2] * h;
@@ -499,9 +553,9 @@ LogoParticles.prototype.update = function (dt) {
         pos[i3 + 1] = ry + off[i3 + 1];
         pos[i3 + 2] = rz + off[i3 + 2];
 
-        // Calore: si accende subito con lo spostamento, si spegne con calma
+        // Calore: spostamento o agitazione, si spegne con calma
         var disp = Math.sqrt(off[i3] * off[i3] + off[i3 + 1] * off[i3 + 1] + off[i3 + 2] * off[i3 + 2]);
-        var target = Math.min(disp / heatRange, 1);
+        var target = Math.max(Math.min(disp / heatRange, 1), a * 0.8);
         heat[i] = target > heat[i] ? target : heat[i] + (target - heat[i]) * coolK;
         data[i3 + 1] = heat[i];
     }
