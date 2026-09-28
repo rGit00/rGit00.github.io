@@ -7,6 +7,8 @@
 // regolabile), che dopo qualche secondo sfuma via. Nella descrizione "\n" va a capo.
 // All'avvio (se attivo) la descrizione della prima scena compare subito, senza ritardo.
 // Scorciatoie: tasti 1, 2, 3... per le voci del menu nell'ordine.
+// "Colore invertito": il menu usa la fusione "difference", cosi un testo bianco
+// diventa nero sulle scene chiare e resta bianco su quelle scure.
 var SceneMenu = pc.createScript('sceneMenu');
 
 SceneMenu.attributes.add('items', {
@@ -34,7 +36,8 @@ SceneMenu.attributes.add('style', {
         { name: 'hoverColor', type: 'rgb', default: [0.6, 0.85, 1], title: 'Colore al passaggio del mouse' },
         { name: 'spacing', type: 'number', default: 12, min: 0, max: 200, precision: 0, title: 'Spazio tra le voci (px)' },
         { name: 'letterSpacing', type: 'number', default: 2, min: 0, max: 20, precision: 1, title: 'Spaziatura lettere (px)' },
-        { name: 'uppercase', type: 'boolean', default: true, title: 'Maiuscolo' }
+        { name: 'uppercase', type: 'boolean', default: true, title: 'Maiuscolo' },
+        { name: 'blendDifference', type: 'boolean', default: false, title: 'Colore invertito (bianco diventa nero sulle scene chiare)' }
     ]
 });
 
@@ -88,7 +91,7 @@ SceneMenu.prototype.initialize = function () {
     // Contenitore: menu + descrizione, ancorati in alto a destra
     var wrap = document.createElement('div');
     wrap.id = SceneMenu.MENU_ID;
-    wrap.style.cssText = [
+    var wrapCss = [
         'position:fixed',
         'top:' + st.offsetTop + 'px',
         'right:' + st.offsetRight + 'px',
@@ -98,7 +101,9 @@ SceneMenu.prototype.initialize = function () {
         'z-index:1000',
         'user-select:none',
         '-webkit-user-select:none'
-    ].join(';');
+    ];
+    if (st.blendDifference) wrapCss.push('mix-blend-mode:difference');
+    wrap.style.cssText = wrapCss.join(';');
 
     var menu = document.createElement('nav');
     menu.style.cssText = [
