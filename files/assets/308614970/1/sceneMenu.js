@@ -7,6 +7,9 @@
 // regolabile), che dopo qualche secondo sfuma via. Nella descrizione "\n" va a capo.
 // All'avvio (se attivo) la descrizione della prima scena compare subito, senza ritardo.
 // Scorciatoie: tasti 1, 2, 3... per le voci del menu nell'ordine.
+// Piu scene in una voce: nel nome scena scrivile separate da virgola
+// (es. "BG_voronoi_logo, BG_datamosh"): a ogni clic sulla voce si passa alla
+// successiva. Le descrizioni si separano con "||", nello stesso ordine.
 // "Colore invertito": il menu usa la fusione "difference", cosi un testo bianco
 // diventa nero sulle scene chiare e resta bianco su quelle scure.
 var SceneMenu = pc.createScript('sceneMenu');
@@ -15,8 +18,8 @@ SceneMenu.attributes.add('items', {
     type: 'json', array: true, title: 'Voci del menu',
     schema: [
         { name: 'label', type: 'string', default: 'Scena', title: 'Scritta' },
-        { name: 'scene', type: 'string', default: '', title: 'Nome scena' },
-        { name: 'description', type: 'string', default: '', title: 'Descrizione (\\n = a capo)' }
+        { name: 'scene', type: 'string', default: '', title: 'Nome scena (piu scene separate da virgola = si alternano)' },
+        { name: 'description', type: 'string', default: '', title: 'Descrizione (\\n = a capo, || = descrizione della scena successiva)' }
     ]
 });
 SceneMenu.attributes.add('startScene', { type: 'string', default: '', title: 'Scena iniziale (vuoto = la prima)' });
@@ -71,7 +74,12 @@ SceneMenu.toCss = function (c, a) {
 
 SceneMenu.prototype.initialize = function () {
     var app = this.app;
-    var items = (this.items || []).filter(function (it) { return it && it.scene; });
+    // ogni voce puo avere piu scene (separate da virgola) e piu descrizioni (separate da ||)
+    var items = (this.items || []).filter(function (it) { return it && it.scene; }).map(function (it) {
+        var scenes = String(it.scene).split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s; });
+        var descs = String(it.description || '').split('||').map(function (s) { return s.trim(); });
+        return { label: it.label, scenes: scenes, descs: descs, idx: 0 };
+    }).filter(function (it) { return it.scenes.length; });
     if (!items.length) {
         console.warn('[sceneMenu] nessuna voce nel menu');
         return;
@@ -172,7 +180,7 @@ SceneMenu.prototype.initialize = function () {
 
     function paint() {
         state.links.forEach(function (l) {
-            var active = l.scene === state.current;
+            var active = l.item.scenes.indexOf(state.current) >= 0;
             var col = l.hover ? st.hoverColor : (active ? st.activeColor : st.color);
             l.el.style.color = SceneMenu.toCss(col, active || l.hover ? 1 : st.opacity);
             l.el.style.borderBottomColor = active ? SceneMenu.toCss(st.activeColor, 0.9) : 'transparent';
@@ -181,29 +189,34 @@ SceneMenu.prototype.initialize = function () {
 
     // fromUser = true quando arriva da un click o da un tasto
     function load(item, fromUser) {
-        if (fromUser) showCaption(item.description, false);
-        else if (cap.showOnStart) showCaption(item.description, true);
-        if (state.loading || item.scene === state.current) return;
-        if (!app.scenes.find(item.scene)) {
-            console.error('[sceneMenu] scena non trovata: ' + item.scene);
+        if (state.loading) return;
+        // voce con piu scene: a ogni clic si passa alla successiva
+        if (fromUser && item.scenes.length > 1) item.idx = (item.idx + 1) % item.scenes.length;
+        var scene = item.scenes[item.idx];
+        var desc = item.descs[item.idx] !== undefined && item.descs[item.idx] !== '' ? item.descs[item.idx] : item.descs[0];
+        if (fromUser) showCaption(desc, false);
+        else if (cap.showOnStart) showCaption(desc, true);
+        if (scene === state.current) return;
+        if (!app.scenes.find(scene)) {
+            console.error('[sceneMenu] scena non trovata: ' + scene);
             return;
         }
         state.loading = true;
-        app.scenes.changeScene(item.scene, function (err) {
+        app.scenes.changeScene(scene, function (err) {
             state.loading = false;
             if (err) {
-                console.error('[sceneMenu] errore caricando ' + item.scene + ': ' + err);
+                console.error('[sceneMenu] errore caricando ' + scene + ': ' + err);
                 return;
             }
-            state.current = item.scene;
-            console.log('[sceneMenu] scena caricata: ' + item.scene);
+            state.current = scene;
+            console.log('[sceneMenu] scena caricata: ' + scene);
             paint();
         });
     }
 
     items.forEach(function (it) {
         var el = document.createElement('a');
-        el.textContent = it.label || it.scene;
+        el.textContent = it.label || it.scenes[0];
         el.style.cssText = [
             'cursor:pointer',
             'font-family:' + st.font,
@@ -215,7 +228,7 @@ SceneMenu.prototype.initialize = function () {
             'border-bottom:1px solid transparent',
             'transition:color .2s, border-color .2s'
         ].join(';');
-        var link = { el: el, scene: it.scene, hover: false };
+        var link = { el: el, item: it, hover: false };
         el.addEventListener('mouseenter', function () { link.hover = true; paint(); });
         el.addEventListener('mouseleave', function () { link.hover = false; paint(); });
         // Evita che il click arrivi al canvas (orbit, trascinamento...)
@@ -242,8 +255,13 @@ SceneMenu.prototype.initialize = function () {
     }
 
     // Scena iniziale
-    var startName = this.startScene || items[0].scene;
-    var startItem = items.filter(function (it) { return it.scene === startName; })[0] || { scene: startName };
+    var startName = this.startScene || items[0].scenes[0];
+    var startItem = null;
+    for (var i = 0; i < items.length && !startItem; i++) {
+        var si = items[i].scenes.indexOf(startName);
+        if (si >= 0) { startItem = items[i]; startItem.idx = si; }
+    }
+    if (!startItem) startItem = { scenes: [startName], descs: [''], idx: 0 };
     // Aspetto un frame: il launcher finisce di inizializzarsi prima di essere sostituito
     setTimeout(function () { load(startItem, false); }, 0);
 };
