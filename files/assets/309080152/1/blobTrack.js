@@ -6,9 +6,10 @@
 // con piu decimali.
 // Da dove nascono i blob:
 //  - computer: dal movimento della webcam
-//  - schermi stretti (telefono): dalla DEFORMAZIONE del logo, cioe' dove
-//    l'immagine del datamosh e' diversa dal logo pulito (la webcam del telefono
-//    fa troppo rumore). Si puo usare anche sul computer con un'opzione.
+//  - schermi stretti (telefono): dai pezzi del logo che si stanno muovendo nel
+//    datamosh (confronto con il frame precedente, con una breve memoria), oppure,
+//    con l'opzione, da tutte le zone diverse dal logo pulito.
+//    Le zone troppo grandi vengono spezzate in piu blob.
 // In piu, un blob agganciato al mouse (o al dito): compare quando si muove ed e'
 // tanto piu grande quanto piu va veloce, e compare da solo: mentre c'e' lui gli
 // altri blob non si vedono.
@@ -34,6 +35,7 @@ BlobTrack.attributes.add('blobs', {
         { name: 'cross', type: 'boolean', default: true, title: 'Crocetta al centro' },
         { name: 'minSize', type: 'number', default: 28, min: 4, max: 400, precision: 0, title: 'Misura minima del mirino (px)' },
         { name: 'maxSize', type: 'number', default: 360, min: 20, max: 2000, precision: 0, title: 'Misura massima del mirino (px)' },
+        { name: 'mobileMaxScale', type: 'number', default: 0.5, min: 0.1, max: 2, precision: 2, title: 'Misura massima sugli schermi stretti (frazione della massima)' },
         { name: 'bigArea', type: 'number', default: 0.04, min: 0.002, max: 0.5, precision: 3, title: 'Zona che da il mirino piu grande (frazione dell\'inquadratura)' },
         { name: 'sizeCurve', type: 'number', default: 0.6, min: 0.1, max: 3, precision: 2, title: 'Differenza tra le misure (basso = piu grandi, alto = piu piccoli)' },
         { name: 'smoothing', type: 'number', default: 0.12, min: 0, max: 1, precision: 2, title: 'Morbidezza del movimento (s)' }
@@ -66,7 +68,10 @@ BlobTrack.attributes.add('detect', {
         { name: 'deformOnMobile', type: 'boolean', default: true, title: 'Sugli schermi stretti i blob seguono la deformazione del logo' },
         { name: 'deformOnDesktop', type: 'boolean', default: false, title: 'Anche sul computer i blob seguono la deformazione del logo' },
         { name: 'breakpoint', type: 'number', default: 820, min: 200, max: 3000, precision: 0, title: 'Larghezza sotto cui e\' uno schermo stretto (px)' },
-        { name: 'deformThreshold', type: 'number', default: 0.15, min: 0.01, max: 1, precision: 3, title: 'Differenza minima dal logo pulito per contare come deformato' }
+        { name: 'deformMotion', type: 'boolean', default: true, title: 'Deformazione: solo i pezzi che si muovono adesso (spento = tutte le zone rotte)' },
+        { name: 'motionPersist', type: 'number', default: 0.3, min: 0.02, max: 3, precision: 2, title: 'Memoria del movimento dei pezzi (s)' },
+        { name: 'deformThreshold', type: 'number', default: 0.15, min: 0.01, max: 1, precision: 3, title: 'Differenza minima per contare come deformato' },
+        { name: 'splitSize', type: 'number', default: 0.2, min: 0.02, max: 1, precision: 3, title: 'Zone piu grandi di cosi vengono spezzate (frazione della larghezza, 1 = mai)' }
     ]
 });
 
@@ -86,16 +91,18 @@ BlobTrack.attributes.add('labels', {
     ]
 });
 
-// mappa della deformazione: per ogni cella, quanto il datamosh differisce dal logo pulito
+// mappa della deformazione: per ogni cella, quanto il datamosh differisce dal
+// riferimento (il frame precedente, oppure il logo pulito se uBtFlip = 1)
 BlobTrack.FS_DIFF = [
     'uniform sampler2D uBtMosh;',
-    'uniform sampler2D uBtLogo;',
+    'uniform sampler2D uBtRef;',
+    'uniform float uBtFlip;',
     'uniform vec2 uBtCell;',
     'uniform float uBtThresh;',
     'varying vec2 vUv0;',
     'float diffAt(vec2 uv) {',
     '    vec3 a = texture2D(uBtMosh, uv).rgb;',
-    '    vec3 b = texture2D(uBtLogo, vec2(uv.x, 1.0 - uv.y)).rgb;',
+    '    vec3 b = texture2D(uBtRef, vec2(uv.x, mix(uv.y, 1.0 - uv.y, uBtFlip))).rgb;',
     '    return step(uBtThresh, distance(a, b));',
     '}',
     'void main(void) {',
@@ -125,6 +132,8 @@ BlobTrack.prototype.initialize = function () {
     this.dPending = false;
     this.dData = null;
     this.dNew = false;
+    this.dAct = null;        // memoria del movimento dei pezzi (CPU)
+    this.dLastRead = 0;
 
     // canvas piccolo per l'analisi della webcam
     this.small = document.createElement('canvas');
@@ -182,7 +191,9 @@ BlobTrack.prototype.refreshButton = function () {
 
 // ---------- Componenti connesse su una maschera (0/1) ----------
 // Restituisce i blob in coordinate 0..1 della maschera (y verso il basso).
-BlobTrack.prototype.components = function (mask, w, h) {
+// split = misura massima di una zona in celle: le zone piu grandi vengono
+// divise in riquadri di quella misura, ognuno diventa un blob.
+BlobTrack.prototype.components = function (mask, w, h, split) {
     var cfg = this.detect, n = w * h;
     // piccola dilatazione: unisce pezzi vicini dello stesso oggetto
     var dil = new Uint8Array(n);
@@ -200,24 +211,53 @@ BlobTrack.prototype.components = function (mask, w, h) {
     }
     var label = new Int32Array(n);
     var stack = new Int32Array(n);
+    var cells = new Int32Array(n);
     var blobs = [];
     var cur = 0;
+    var sp2 = Math.max(2, split || n);
     for (var s = 0; s < n; s++) {
         if (!dil[s] || label[s]) continue;
         cur++;
-        var sp = 0; stack[sp++] = s; label[s] = cur;
-        var area = 0, moved = 0, sx = 0, sy = 0;
+        var sp = 0, nc = 0; stack[sp++] = s; label[s] = cur;
+        var minX = w, minY = h, maxX = 0, maxY = 0;
         while (sp > 0) {
             var p = stack[--sp];
+            cells[nc++] = p;
             var px0 = p % w, py0 = (p - px0) / w;
-            area++; moved += mask[p]; sx += px0; sy += py0;
+            if (px0 < minX) minX = px0;
+            if (px0 > maxX) maxX = px0;
+            if (py0 < minY) minY = py0;
+            if (py0 > maxY) maxY = py0;
             if (px0 > 0 && dil[p - 1] && !label[p - 1]) { label[p - 1] = cur; stack[sp++] = p - 1; }
             if (px0 < w - 1 && dil[p + 1] && !label[p + 1]) { label[p + 1] = cur; stack[sp++] = p + 1; }
             if (py0 > 0 && dil[p - w] && !label[p - w]) { label[p - w] = cur; stack[sp++] = p - w; }
             if (py0 < h - 1 && dil[p + w] && !label[p + w]) { label[p + w] = cur; stack[sp++] = p + w; }
         }
-        if (area < cfg.minArea) continue;
-        blobs.push({ x: (sx / area + 0.5) / w, y: (sy / area + 0.5) / h, area: moved / n });
+        if (nc < cfg.minArea) continue;
+        var bw = maxX - minX + 1, bh = maxY - minY + 1;
+        if (bw <= sp2 && bh <= sp2) {
+            // zona normale: un blob
+            var area = 0, moved = 0, sx = 0, sy = 0;
+            for (var c = 0; c < nc; c++) {
+                var q = cells[c], qx = q % w, qy = (q - qx) / w;
+                area++; moved += mask[q]; sx += qx; sy += qy;
+            }
+            blobs.push({ x: (sx / area + 0.5) / w, y: (sy / area + 0.5) / h, area: moved / n });
+        } else {
+            // zona troppo grande: la divido in riquadri
+            var tw = Math.ceil(bw / sp2), th = Math.ceil(bh / sp2), nt = tw * th;
+            var tA = new Float32Array(nt), tM = new Float32Array(nt), tX = new Float32Array(nt), tY = new Float32Array(nt);
+            for (var c2 = 0; c2 < nc; c2++) {
+                var q2 = cells[c2], qx2 = q2 % w, qy2 = (q2 - qx2) / w;
+                var ti = Math.floor((qx2 - minX) / sp2) + Math.floor((qy2 - minY) / sp2) * tw;
+                tA[ti]++; tM[ti] += mask[q2]; tX[ti] += qx2; tY[ti] += qy2;
+            }
+            var minT = Math.max(1, cfg.minArea * 0.5);
+            for (var t = 0; t < nt; t++) {
+                if (tA[t] < minT || tM[t] <= 0) continue;
+                blobs.push({ x: (tX[t] / tA[t] + 0.5) / w, y: (tY[t] / tA[t] + 0.5) / h, area: tM[t] / n });
+            }
+        }
     }
     blobs.sort(function (a, b) { return b.area - a.area; });
     return blobs.slice(0, Math.max(1, Math.round(this.blobs.count)));
@@ -247,7 +287,7 @@ BlobTrack.prototype.findWebcamBlobs = function (video) {
     var thr = cfg.threshold;
     var mask = new Uint8Array(n);
     for (var k = 0; k < n; k++) mask[k] = Math.abs(luma[k] - prev[k]) > thr ? 1 : 0;
-    return this.components(mask, w, h);
+    return this.components(mask, w, h, 0);
 };
 
 // ---------- Sorgente 2: deformazione del logo (in uv dello schermo, y verso il basso) ----------
@@ -258,7 +298,8 @@ BlobTrack.prototype.destroyDeform = function () {
 
 BlobTrack.prototype.runDeform = function (dm) {
     var dev = this.app.graphicsDevice;
-    var w = Math.max(16, Math.round(this.detect.resolution));
+    var cfg = this.detect;
+    var w = Math.max(16, Math.round(cfg.resolution));
     var h = Math.max(12, Math.round(w * dev.height / Math.max(1, dev.width)));
     if (!this.dRT || this.dW !== w || this.dH !== h) {
         this.destroyDeform();
@@ -270,13 +311,17 @@ BlobTrack.prototype.runDeform = function (dm) {
         });
         this.dRT = new pc.RenderTarget({ colorBuffer: this.dTex, depth: false });
         this.dData = null;
+        this.dAct = new Float32Array(w * h);
     }
-    if (!this.shDiff) this.shDiff = dm.makeShader('btDiff', BlobTrack.FS_DIFF);
-    if (!dm.moshA || !dm.logoTex) return;
+    if (!this.shDiff) this.shDiff = dm.makeShader('btDiff2', BlobTrack.FS_DIFF);
+    if (!dm.moshA || !dm.moshB || !dm.logoTex) return;
+    // il datamosh ha appena scritto moshA; moshB contiene il frame precedente
+    var motion = cfg.deformMotion !== false;
     dm.setU('uBtMosh', dm.moshA.tex);
-    dm.setU('uBtLogo', dm.logoTex);
+    dm.setU('uBtRef', motion ? dm.moshB.tex : dm.logoTex);
+    dm.setU('uBtFlip', motion ? 0 : 1);
     dm.setU('uBtCell', [1 / w, 1 / h]);
-    dm.setU('uBtThresh', this.detect.deformThreshold);
+    dm.setU('uBtThresh', cfg.deformThreshold);
     pc.drawQuadWithShader(dev, this.dRT, this.shDiff);
 
     // lettura della mappa (asincrona: arriva un frame o due dopo)
@@ -294,15 +339,27 @@ BlobTrack.prototype.runDeform = function (dm) {
 };
 
 BlobTrack.prototype.findDeformBlobs = function () {
-    var w = this.dW, h = this.dH, data = this.dData;
+    var cfg = this.detect;
+    var w = this.dW, h = this.dH, data = this.dData, act = this.dAct;
     var n = w * h;
+    var motion = cfg.deformMotion !== false;
+    // memoria: le celle mosse si spengono piano, cosi i mirini non lampeggiano
+    var since = Math.max(0, this.time - this.dLastRead);
+    this.dLastRead = this.time;
+    var decay = motion ? Math.exp(-since / Math.max(cfg.motionPersist, 0.01)) : 0;
     var mask = new Uint8Array(n);
     // la texture ha la riga 0 in basso: la ribalto (y verso il basso come lo schermo)
     for (var y = 0; y < h; y++) {
         var src = (h - 1 - y) * w * 4, dst = y * w;
-        for (var x = 0; x < w; x++) mask[dst + x] = data[src + x * 4] > 60 ? 1 : 0;
+        for (var x = 0; x < w; x++) {
+            var i = dst + x;
+            var on = data[src + x * 4] > 60 ? 1 : 0;
+            act[i] = Math.max(act[i] * decay, on);
+            mask[i] = act[i] > 0.3 ? 1 : 0;
+        }
     }
-    return this.components(mask, w, h);
+    var split = Math.max(2, Math.round(cfg.splitSize * w));
+    return this.components(mask, w, h, split);
 };
 
 // ---------- Tracking ----------
@@ -401,8 +458,10 @@ BlobTrack.prototype.update = function (dt) {
     if (!bl.enabled || !dm) { this.tracks.length = 0; this.mt = null; return; }
     var lb = this.labels, hold = cfg.hold;
     var k = bl.smoothing > 0 ? 1 - Math.exp(-dt / bl.smoothing) : 1;
-    var minS = Math.min(bl.minSize, bl.maxSize), maxS = Math.max(bl.minSize, bl.maxSize);
     var narrow = this.narrow = cw <= cfg.breakpoint;
+    var minS = Math.min(bl.minSize, bl.maxSize);
+    var maxS = Math.max(bl.minSize, bl.maxSize);
+    if (narrow) maxS = Math.max(minS + 4, maxS * bl.mobileMaxScale);
 
     // sfarfallio delle ultime cifre
     var flick = false;
