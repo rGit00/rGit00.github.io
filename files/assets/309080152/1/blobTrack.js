@@ -2,15 +2,16 @@
 // Blob tracking in sovrimpressione: trova le zone in movimento, le segue da un
 // frame all'altro e disegna su ognuna un mirino quadrato (che cambia dimensione
 // con la zona) e dei numeri "tecnici" (ID, posizione, misura) con 4 cifre dopo
-// la virgola che sfarfallano.
+// la virgola che sfarfallano. Sul telefono: una sola riga (X), piu piccola e
+// con piu decimali.
 // Da dove nascono i blob:
 //  - computer: dal movimento della webcam
 //  - schermi stretti (telefono): dalla DEFORMAZIONE del logo, cioe' dove
 //    l'immagine del datamosh e' diversa dal logo pulito (la webcam del telefono
 //    fa troppo rumore). Si puo usare anche sul computer con un'opzione.
 // In piu, un blob agganciato al mouse (o al dito): compare quando si muove ed e'
-// tanto piu grande quanto piu va veloce. Sul telefono compare da solo: mentre
-// c'e' lui gli altri blob non si vedono (opzione anche per il computer).
+// tanto piu grande quanto piu va veloce, e compare da solo: mentre c'e' lui gli
+// altri blob non si vedono.
 // Usa la webcam, il mouse e le immagini dello script datamosh sulla stessa entita.
 // Pulsante "Blob" in alto a sinistra (sotto "Invert") per accenderli e spegnerli.
 //
@@ -44,7 +45,7 @@ BlobTrack.attributes.add('mouseBlob', {
     schema: [
         { name: 'enabled', type: 'boolean', default: true, title: 'Attivo' },
         { name: 'aloneOnMobile', type: 'boolean', default: true, title: 'Sugli schermi stretti compare da solo (nasconde gli altri blob)' },
-        { name: 'aloneOnDesktop', type: 'boolean', default: false, title: 'Anche sul computer compare da solo' },
+        { name: 'aloneOnDesktop', type: 'boolean', default: true, title: 'Anche sul computer compare da solo' },
         { name: 'speedForMax', type: 'number', default: 1.5, min: 0.05, max: 10, precision: 2, title: 'Velocita per il mirino piu grande (schermi al secondo)' },
         { name: 'minSpeed', type: 'number', default: 0.05, min: 0, max: 2, precision: 3, title: 'Velocita minima per farlo comparire' },
         { name: 'hold', type: 'number', default: 0.4, min: 0, max: 5, precision: 2, title: 'Quanto resta quando il mouse si ferma (s)' },
@@ -78,7 +79,10 @@ BlobTrack.attributes.add('labels', {
         { name: 'fontSize', type: 'number', default: 11, min: 6, max: 32, precision: 0, title: 'Dimensione (px)' },
         { name: 'font', type: 'string', default: 'Menlo, Consolas, monospace', title: 'Font' },
         { name: 'flicker', type: 'number', default: 8, min: 0, max: 60, precision: 1, title: 'Sfarfallio delle cifre (volte al secondo, 0 = fermo)' },
-        { name: 'lines', type: 'number', default: 4, min: 1, max: 4, precision: 0, step: 1, title: 'Righe (1 = ID, 2 = +X, 3 = +Y, 4 = +S)' }
+        { name: 'lines', type: 'number', default: 4, min: 1, max: 4, precision: 0, step: 1, title: 'Righe (1 = ID, 2 = +X, 3 = +Y, 4 = +S)' },
+        { name: 'mobileOnlyX', type: 'boolean', default: true, title: 'Sugli schermi stretti mostra solo la X' },
+        { name: 'mobileScale', type: 'number', default: 0.5, min: 0.2, max: 2, precision: 2, title: 'Dimensione dei numeri sugli schermi stretti (1 = come il computer)' },
+        { name: 'mobileDecimals', type: 'number', default: 6, min: 0, max: 10, precision: 0, step: 1, title: 'Decimali sugli schermi stretti' }
     ]
 });
 
@@ -116,6 +120,7 @@ BlobTrack.prototype.initialize = function () {
     this.flickT = 0;
     this.mt = null;          // blob del mouse
     this.mode = '';          // 'webcam' oppure 'deform'
+    this.narrow = false;     // schermo stretto (telefono)
     this.dRT = null;         // mappa della deformazione (GPU)
     this.dPending = false;
     this.dData = null;
@@ -358,17 +363,25 @@ BlobTrack.prototype.drawBlob = function (ctx, cw, cx, cy, size, alpha, id, nx, n
 
     if (!lb.show) return;
     var jx = (jit[0] - 0.5) * 0.002, jy = (jit[1] - 0.5) * 0.002, js = (jit[2] - 0.5) * 0.002;
-    var rows = ['ID ' + (id < 10 ? '0' : '') + id];
-    if (lb.lines >= 2) rows.push('X ' + Math.abs(nx + jx).toFixed(4));
-    if (lb.lines >= 3) rows.push('Y ' + Math.abs(ny + jy).toFixed(4));
-    if (lb.lines >= 4) rows.push('S ' + Math.abs(ns + js).toFixed(4));
+    var rows;
+    if (this.narrow && lb.mobileOnlyX !== false) {
+        // telefono: una sola riga, con piu decimali (le ultime cifre sfarfallano)
+        var dec = Math.max(0, Math.round(lb.mobileDecimals));
+        var jf = (jit[0] - 0.5) * Math.pow(10, -Math.max(2, dec - 2));
+        rows = ['X ' + Math.abs(nx + jf).toFixed(dec)];
+    } else {
+        rows = ['ID ' + (id < 10 ? '0' : '') + id];
+        if (lb.lines >= 2) rows.push('X ' + Math.abs(nx + jx).toFixed(4));
+        if (lb.lines >= 3) rows.push('Y ' + Math.abs(ny + jy).toFixed(4));
+        if (lb.lines >= 4) rows.push('S ' + Math.abs(ns + js).toFixed(4));
+    }
     ctx.fillStyle = txtCol;
-    var lh = lb.fontSize * 1.2;
-    var tx = x1 + 6, ty = y0;
+    var lh = this.fontPx * 1.2;
+    var tx = x1 + 4, ty = y0;
     // se esce a destra, metto i numeri a sinistra del mirino
     var maxW = 0;
     for (var r = 0; r < rows.length; r++) maxW = Math.max(maxW, ctx.measureText(rows[r]).width);
-    if (tx + maxW > cw - 4) tx = x0 - 6 - maxW;
+    if (tx + maxW > cw - 4) tx = x0 - 4 - maxW;
     for (var q = 0; q < rows.length; q++) ctx.fillText(rows[q], tx, ty + q * lh);
 };
 
@@ -389,7 +402,7 @@ BlobTrack.prototype.update = function (dt) {
     var lb = this.labels, hold = cfg.hold;
     var k = bl.smoothing > 0 ? 1 - Math.exp(-dt / bl.smoothing) : 1;
     var minS = Math.min(bl.minSize, bl.maxSize), maxS = Math.max(bl.minSize, bl.maxSize);
-    var narrow = cw <= cfg.breakpoint;
+    var narrow = this.narrow = cw <= cfg.breakpoint;
 
     // sfarfallio delle ultime cifre
     var flick = false;
@@ -401,7 +414,8 @@ BlobTrack.prototype.update = function (dt) {
     var lineCol = BlobTrack.toCss(bl.color, bl.opacity);
     var txtCol = BlobTrack.toCss(lb.color, lb.opacity);
     ctx.lineWidth = bl.lineWidth;
-    ctx.font = lb.fontSize + 'px ' + lb.font;
+    this.fontPx = Math.max(4, lb.fontSize * (narrow ? lb.mobileScale : 1));
+    ctx.font = this.fontPx + 'px ' + lb.font;
     ctx.textBaseline = 'top';
 
     // ---- stato del blob del mouse / tocco (prima, per sapere se deve stare da solo) ----
