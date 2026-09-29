@@ -8,7 +8,7 @@
 //    scia di celle deformate) e "respirano" lentissimamente
 //  - Punti del mouse: nascono gradualmente mentre il mouse resta sulla pagina,
 //    lo seguono, a mouse fermo tremolano con un noise, spariscono gradualmente
-//    quando il mouse esce
+//    quando il mouse esce. Sul touch restano dove hai alzato il dito.
 //  - Forma della zona fitta: i punti esterni seguono il mouse con piu ritardo
 //    (effetto cometa) e il bordo e' deformato da un noise che cambia nel tempo
 //  - Scia: muovendo il mouse alcuni punti si staccano e restano indietro, poi le
@@ -60,7 +60,9 @@ BgVoronoi.attributes.add('mouse', {
         { name: 'cluster', type: 'number', default: 1.6, min: 0.3, max: 5, precision: 2, title: 'Concentrazione al centro (alto = piu punti vicino al cursore)' },
         { name: 'follow', type: 'number', default: 40, min: 1, max: 400, precision: 0, title: 'Quanto seguono il mouse (rigidita)' },
         { name: 'jitter', type: 'number', default: 5, min: 0, max: 100, precision: 1, title: 'Tremolio (px)' },
-        { name: 'jitterSpeed', type: 'number', default: 1.2, min: 0, max: 10, precision: 2, title: 'Velocita tremolio' }
+        { name: 'jitterSpeed', type: 'number', default: 1.2, min: 0, max: 10, precision: 2, title: 'Velocita tremolio' },
+        { name: 'touchStay', type: 'boolean', default: true, title: 'Touch: quando alzi il dito i punti restano li (come il mouse fermo)' },
+        { name: 'touchHold', type: 'number', default: 0, min: 0, max: 60, precision: 1, title: 'Touch: quanto restano dopo aver alzato il dito (s, 0 = finche non tocchi altrove)' }
     ]
 });
 
@@ -284,9 +286,16 @@ BgVoronoi.prototype.initialize = function () {
         self.mouseX = cx * r;
         self.mouseY = (rect.height - cy) * r;
         self.hasMouse = true;
+        if (e.touches) self.touchLift = -1;
     };
     this.onOut = function (e) { if (!e.relatedTarget) self.hasMouse = false; };
-    this.onTouchEnd = function (e) { if (!e.touches || !e.touches.length) self.hasMouse = false; };
+    // dito alzato: i punti restano dove era il dito (come il mouse fermo), oppure spariscono
+    this.touchLift = -1;
+    this.onTouchEnd = function (e) {
+        if (e.touches && e.touches.length) return;
+        if (self.mouse.touchStay !== false) self.touchLift = self.time;
+        else self.hasMouse = false;
+    };
     window.addEventListener('pointermove', this.onMove);
     window.addEventListener('touchstart', this.onMove, { passive: true });
     window.addEventListener('touchmove', this.onMove, { passive: true });
@@ -844,6 +853,10 @@ BgVoronoi.prototype.update = function (dt) {
     var m = this.mouse, ph = this.physics, sh = this.shape, tr = this.trail;
 
     // ---- Presenza e velocita del mouse ----
+    if (this.touchLift >= 0 && m.touchHold > 0 && t - this.touchLift > m.touchHold) {
+        this.touchLift = -1;
+        this.hasMouse = false;
+    }
     var active = m.enabled && this.hasMouse;
     var spd = 0;
     if (active && this.prevActive && dt > 0) {
