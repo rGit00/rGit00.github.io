@@ -8,7 +8,8 @@
 // ridotti nella stessa proporzione, cosi l'effetto sembra uguale, solo piu piccolo.
 // Inoltre:
 //  - gravita e raggio del mouse del datamosh si misurano sul lato corto dello
-//    schermo (e non sull'altezza), cosi in verticale non corrono troppo
+//    schermo (e non sull'altezza), cosi in verticale non corrono troppo;
+//    sugli schermi stretti la gravita si puo rallentare ancora con un cursore
 //  - con lo schermo verticale il logo usa una sua larghezza (nel file SVG il
 //    disegno occupa circa il 61% della larghezza: 1.5 = disegno quasi a filo dei bordi)
 //  - sugli schermi stretti la soglia di rumore della webcam e' piu alta
@@ -21,6 +22,7 @@ MobileAdapt.attributes.add('maxScale', { type: 'number', default: 1, min: 1, max
 MobileAdapt.attributes.add('portraitLogo', { type: 'number', default: 1.5, min: 0.05, max: 3, precision: 3, title: 'Larghezza del logo con lo schermo verticale (1.5 = quasi a filo dei bordi)' });
 MobileAdapt.attributes.add('breakpoint', { type: 'number', default: 820, min: 200, max: 3000, precision: 0, title: 'Larghezza sotto cui e\' uno schermo stretto (px)' });
 MobileAdapt.attributes.add('webcamThreshold', { type: 'number', default: 0.06, min: 0, max: 0.3, precision: 3, title: 'Soglia di rumore della webcam sugli schermi stretti' });
+MobileAdapt.attributes.add('gravityMobile', { type: 'number', default: 0.4, min: 0, max: 2, precision: 2, title: 'Velocita della gravita sugli schermi stretti (1 = come il computer, piu basso = piu lenta)' });
 
 MobileAdapt.prototype.postInitialize = function () {
     this.base = null;
@@ -30,7 +32,7 @@ MobileAdapt.prototype.postInitialize = function () {
     this.onResize = function () { self.apply(); };
     window.addEventListener('resize', this.onResize);
     window.addEventListener('orientationchange', this.onResize);
-    this.on('attr:portraitLogo', function () { this.lastKey = ''; this.apply(); }, this);
+    this.on('attr', function () { this.lastKey = ''; this.apply(); }, this);
     this.on('destroy', function () {
         window.removeEventListener('resize', this.onResize);
         window.removeEventListener('orientationchange', this.onResize);
@@ -85,13 +87,14 @@ MobileAdapt.prototype.apply = function () {
 
     var d = s.datamosh;
     if (d && b.d) {
+        var gMul = shortOverH * (narrow ? this.gravityMobile : 1);
         d.blocks.maxSize = Math.max(2, b.d.maxB * k);
         d.blocks.minSize = Math.max(1, b.d.minB * Math.max(k, 0.5));
         d.blocks.lineThickness = Math.max(1, Math.round(b.d.lineT * Math.max(k, 0.5)));
         d.mosh.chroma = b.d.chroma * k;
         d.mouse.radius = b.d.mouseR * shortOverH;
-        d.gravity.strength = b.d.gStrength * shortOverH;
-        d.gravity.maxSpeed = b.d.gMax * shortOverH;
+        d.gravity.strength = b.d.gStrength * gMul;
+        d.gravity.maxSpeed = b.d.gMax * gMul;
         d.webcam.threshold = narrow ? Math.max(b.d.threshold, this.webcamThreshold) : b.d.threshold;
         var newSize = portrait ? this.portraitLogo : b.d.logoSize;
         if (newSize !== d.logo.size) {
