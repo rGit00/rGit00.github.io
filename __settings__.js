@@ -1,6 +1,6 @@
 window.ASSET_PREFIX = "";
 window.SCRIPT_PREFIX = "";
-window.SCENE_PATH = "2606896.json?v=20260929-151038";
+window.SCENE_PATH = "2606896.json?v=20260929-151819";
 window.CONTEXT_OPTIONS = {
     'antialias': true,
     'alpha': false,
@@ -9,7 +9,7 @@ window.CONTEXT_OPTIONS = {
     'powerPreference': "high-performance"
 };
 window.SCRIPTS = [ 308554558, 308555216, 308557312, 308602633, 308608018, 308614970, 308625103, 308935168, 308940041, 308964098, 309071603, 309080152, 309102768 ];
-window.CONFIG_FILENAME = "config.json?v=20260929-151038";
+window.CONFIG_FILENAME = "config.json?v=20260929-151819";
 window.INPUT_SETTINGS = {
     useKeyboard: true,
     useMouse: true,
