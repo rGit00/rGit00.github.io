@@ -9,7 +9,9 @@
 //  - schermi stretti (telefono): dai pezzi del logo che si stanno muovendo nel
 //    datamosh (confronto con il frame precedente, con una breve memoria), oppure,
 //    con l'opzione, da tutte le zone diverse dal logo pulito.
-//    Le zone troppo grandi vengono spezzate in piu blob.
+//    Le zone troppo grandi vengono spezzate in piu blob, con in piu un mirino
+//    grande su tutta la zona che si sovrappone ai piccoli.
+// Ogni mirino ha anche una sua misura casuale (Varieta), cosi non sono tutti uguali.
 // In piu, un blob agganciato al mouse (o al dito): compare quando si muove ed e'
 // tanto piu grande quanto piu va veloce, e compare da solo: mentre c'e' lui gli
 // altri blob non si vedono.
@@ -38,6 +40,7 @@ BlobTrack.attributes.add('blobs', {
         { name: 'mobileMaxScale', type: 'number', default: 0.5, min: 0.1, max: 2, precision: 2, title: 'Misura massima sugli schermi stretti (frazione della massima)' },
         { name: 'bigArea', type: 'number', default: 0.04, min: 0.002, max: 0.5, precision: 3, title: 'Zona che da il mirino piu grande (frazione dell\'inquadratura)' },
         { name: 'sizeCurve', type: 'number', default: 0.6, min: 0.1, max: 3, precision: 2, title: 'Differenza tra le misure (basso = piu grandi, alto = piu piccoli)' },
+        { name: 'sizeVariety', type: 'number', default: 0.6, min: 0, max: 1, precision: 2, title: 'Varieta casuale delle misure (0 = solo in base alla zona)' },
         { name: 'smoothing', type: 'number', default: 0.12, min: 0, max: 1, precision: 2, title: 'Morbidezza del movimento (s)' }
     ]
 });
@@ -71,7 +74,8 @@ BlobTrack.attributes.add('detect', {
         { name: 'deformMotion', type: 'boolean', default: true, title: 'Deformazione: solo i pezzi che si muovono adesso (spento = tutte le zone rotte)' },
         { name: 'motionPersist', type: 'number', default: 0.3, min: 0.02, max: 3, precision: 2, title: 'Memoria del movimento dei pezzi (s)' },
         { name: 'deformThreshold', type: 'number', default: 0.15, min: 0.01, max: 1, precision: 3, title: 'Differenza minima per contare come deformato' },
-        { name: 'splitSize', type: 'number', default: 0.2, min: 0.02, max: 1, precision: 3, title: 'Zone piu grandi di cosi vengono spezzate (frazione della larghezza, 1 = mai)' }
+        { name: 'splitSize', type: 'number', default: 0.2, min: 0.02, max: 1, precision: 3, title: 'Zone piu grandi di cosi vengono spezzate (frazione della larghezza, 1 = mai)' },
+        { name: 'splitNested', type: 'boolean', default: true, title: 'Zone spezzate: anche un mirino grande su tutta la zona (si sovrappone ai piccoli)' }
     ]
 });
 
@@ -134,6 +138,8 @@ BlobTrack.prototype.initialize = function () {
     this.dNew = false;
     this.dAct = null;        // memoria del movimento dei pezzi (CPU)
     this.dLastRead = 0;
+    this.dQuiet = 1.0;       // all'avvio aspetto un attimo prima di cercare i pezzi mossi
+    this.lastLogoToken = -1;
 
     // canvas piccolo per l'analisi della webcam
     this.small = document.createElement('canvas');
@@ -251,6 +257,15 @@ BlobTrack.prototype.components = function (mask, w, h, split) {
                 var q2 = cells[c2], qx2 = q2 % w, qy2 = (q2 - qx2) / w;
                 var ti = Math.floor((qx2 - minX) / sp2) + Math.floor((qy2 - minY) / sp2) * tw;
                 tA[ti]++; tM[ti] += mask[q2]; tX[ti] += qx2; tY[ti] += qy2;
+            }
+            // mirino grande su tutta la zona, sopra i mirini piccoli
+            if (cfg.splitNested !== false) {
+                var allM = 0, allX = 0, allY = 0;
+                for (var c3 = 0; c3 < nc; c3++) {
+                    var q3 = cells[c3], qx3 = q3 % w;
+                    allM += mask[q3]; allX += qx3; allY += (q3 - qx3) / w;
+                }
+                if (allM > 0) blobs.push({ x: (allX / nc + 0.5) / w, y: (allY / nc + 0.5) / h, area: allM / n });
             }
             var minT = Math.max(1, cfg.minArea * 0.5);
             for (var t = 0; t < nt; t++) {
@@ -384,7 +399,8 @@ BlobTrack.prototype.track = function (found) {
         } else if (tracks.length < Math.round(this.blobs.count)) {
             tracks.push({
                 id: this.newId(), x: f.x, y: f.y, tx: f.x, ty: f.y, a: f.area, ta: f.area,
-                matched: true, lastSeen: this.time, born: this.time, jit: [0.5, 0.5, 0.5]
+                matched: true, lastSeen: this.time, born: this.time, jit: [0.5, 0.5, 0.5],
+                sv: Math.random() * 2 - 1
             });
         }
     }
@@ -513,9 +529,17 @@ BlobTrack.prototype.update = function (dt) {
     var sx = 1, sy = 1, have = false;
     if (mode === 'deform') {
         this.runDeform(dm);
+        // quando il logo viene ridisegnato (avvio della scena, Invert) cambia tutto
+        // di colpo: per un attimo non lo conto come movimento
+        if (dm.logoToken !== this.lastLogoToken) {
+            this.lastLogoToken = dm.logoToken;
+            this.dQuiet = this.time + 0.6;
+            if (this.dAct) this.dAct.fill(0);
+        }
         if (this.dNew && this.dData) {
             this.dNew = false;
-            this.track(this.findDeformBlobs());
+            if (this.time > this.dQuiet) this.track(this.findDeformBlobs());
+            else { this.dLastRead = this.time; if (this.dAct) this.dAct.fill(0); }
         }
         have = true;                              // coordinate gia dello schermo
     } else {
@@ -552,6 +576,8 @@ BlobTrack.prototype.update = function (dt) {
                 if (flick) tr.jit = [Math.random(), Math.random(), Math.random()];
                 var st = Math.min(1, Math.max(0, tr.a / Math.max(bl.bigArea, 1e-4)));
                 var size = minS + (maxS - minS) * Math.pow(st, bl.sizeCurve);
+                // ogni mirino ha una sua misura casuale (da circa 1/3 a 3 volte)
+                size = Math.min(maxS, Math.max(minS * 0.6, size * Math.pow(3, (tr.sv || 0) * (bl.sizeVariety || 0))));
                 this.drawBlob(ctx, cw,
                     (0.5 + (tr.x - 0.5) / sx) * cw, (0.5 + (tr.y - 0.5) / sy) * ch, size, a,
                     tr.id, tr.x, 1 - tr.y, tr.a, tr.jit, lineCol, txtCol);
