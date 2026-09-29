@@ -1,18 +1,21 @@
 // blobTrack.js
-// Blob tracking in sovrimpressione: trova le zone in movimento nella webcam,
-// le segue da un frame all'altro e disegna su ognuna un mirino quadrato (che
-// cambia dimensione con la zona) e dei numeri "tecnici" (ID, posizione, misura)
-// con 4 cifre dopo la virgola che sfarfallano.
+// Blob tracking in sovrimpressione: trova le zone in movimento, le segue da un
+// frame all'altro e disegna su ognuna un mirino quadrato (che cambia dimensione
+// con la zona) e dei numeri "tecnici" (ID, posizione, misura) con 4 cifre dopo
+// la virgola che sfarfallano.
+// Da dove nascono i blob:
+//  - computer: dal movimento della webcam
+//  - schermi stretti (telefono): dalla DEFORMAZIONE del logo, cioe' dove
+//    l'immagine del datamosh e' diversa dal logo pulito (la webcam del telefono
+//    fa troppo rumore). Si puo usare anche sul computer con un'opzione.
 // In piu, un blob agganciato al mouse: compare quando il mouse si muove ed e'
 // tanto piu grande quanto piu il mouse va veloce.
-// Usa la webcam e il mouse dello script datamosh sulla stessa entita.
+// Usa la webcam, il mouse e le immagini dello script datamosh sulla stessa entita.
 // Pulsante "Blob" in alto a sinistra (sotto "Invert") per accenderli e spegnerli.
 //
-// Come trova i blob: il video viene rimpicciolito (80 x 60 circa), si confronta
-// ogni frame con il precedente, i pixel cambiati formano una maschera e i gruppi
-// di pixel vicini (componenti connesse) diventano i blob. Tutto sulla CPU, leggero.
-// La misura del mirino dipende da quanto movimento c'e' nella zona (la sua area):
-// zone piccole = mirino piccolo, zone grandi = mirino grande.
+// Come trova i blob: si costruisce una maschera piccola (circa 80 celle di
+// larghezza) delle celle "attive", i gruppi di celle vicine (componenti connesse)
+// diventano i blob. La misura del mirino dipende da quanta area attiva c'e'.
 var BlobTrack = pc.createScript('blobTrack');
 
 BlobTrack.attributes.add('blobs', {
@@ -51,11 +54,15 @@ BlobTrack.attributes.add('mouseBlob', {
 BlobTrack.attributes.add('detect', {
     type: 'json', title: 'Rilevamento',
     schema: [
-        { name: 'threshold', type: 'number', default: 0.08, min: 0.01, max: 0.5, precision: 3, title: 'Soglia di movimento (alto = solo movimenti forti)' },
+        { name: 'threshold', type: 'number', default: 0.08, min: 0.01, max: 0.5, precision: 3, title: 'Soglia di movimento della webcam (alto = solo movimenti forti)' },
         { name: 'minArea', type: 'number', default: 6, min: 1, max: 400, precision: 0, title: 'Area minima di un blob (celle)' },
         { name: 'hold', type: 'number', default: 0.5, min: 0, max: 5, precision: 2, title: 'Quanto resta un blob quando il movimento finisce (s)' },
         { name: 'match', type: 'number', default: 0.15, min: 0.02, max: 0.6, precision: 2, title: 'Distanza per riconoscere lo stesso blob (frazione schermo)' },
-        { name: 'resolution', type: 'number', default: 80, min: 32, max: 200, precision: 0, step: 1, title: 'Risoluzione di analisi (larghezza)' }
+        { name: 'resolution', type: 'number', default: 80, min: 32, max: 200, precision: 0, step: 1, title: 'Risoluzione di analisi (larghezza)' },
+        { name: 'deformOnMobile', type: 'boolean', default: true, title: 'Sugli schermi stretti i blob seguono la deformazione del logo' },
+        { name: 'deformOnDesktop', type: 'boolean', default: false, title: 'Anche sul computer i blob seguono la deformazione del logo' },
+        { name: 'breakpoint', type: 'number', default: 820, min: 200, max: 3000, precision: 0, title: 'Larghezza sotto cui e\' uno schermo stretto (px)' },
+        { name: 'deformThreshold', type: 'number', default: 0.15, min: 0.01, max: 1, precision: 3, title: 'Differenza minima dal logo pulito per contare come deformato' }
     ]
 });
 
@@ -72,6 +79,26 @@ BlobTrack.attributes.add('labels', {
     ]
 });
 
+// mappa della deformazione: per ogni cella, quanto il datamosh differisce dal logo pulito
+BlobTrack.FS_DIFF = [
+    'uniform sampler2D uBtMosh;',
+    'uniform sampler2D uBtLogo;',
+    'uniform vec2 uBtCell;',
+    'uniform float uBtThresh;',
+    'varying vec2 vUv0;',
+    'float diffAt(vec2 uv) {',
+    '    vec3 a = texture2D(uBtMosh, uv).rgb;',
+    '    vec3 b = texture2D(uBtLogo, vec2(uv.x, 1.0 - uv.y)).rgb;',
+    '    return step(uBtThresh, distance(a, b));',
+    '}',
+    'void main(void) {',
+    '    vec2 o = uBtCell * 0.25;',
+    '    float d = diffAt(vUv0 + vec2(-o.x, -o.y)) + diffAt(vUv0 + vec2(o.x, -o.y)) +',
+    '              diffAt(vUv0 + vec2(-o.x, o.y)) + diffAt(vUv0 + vec2(o.x, o.y)) + diffAt(vUv0);',
+    '    gl_FragColor = vec4(d * 0.2, 0.0, 0.0, 1.0);',
+    '}'
+].join('\n');
+
 BlobTrack.toCss = function (c, a) {
     var r = Array.isArray(c) ? c[0] : c.r, g = Array.isArray(c) ? c[1] : c.g, b = Array.isArray(c) ? c[2] : c.b;
     return 'rgba(' + Math.round(r * 255) + ',' + Math.round(g * 255) + ',' + Math.round(b * 255) + ',' + a + ')';
@@ -85,6 +112,11 @@ BlobTrack.prototype.initialize = function () {
     this.time = 0;
     this.flickT = 0;
     this.mt = null;          // blob del mouse
+    this.mode = '';          // 'webcam' oppure 'deform'
+    this.dRT = null;         // mappa della deformazione (GPU)
+    this.dPending = false;
+    this.dData = null;
+    this.dNew = false;
 
     // canvas piccolo per l'analisi della webcam
     this.small = document.createElement('canvas');
@@ -99,8 +131,10 @@ BlobTrack.prototype.initialize = function () {
     this.on('attr:blobs', this.refreshButton, this);
 
     this.on('destroy', function () {
+        this.dead = true;
         if (this.overlay && this.overlay.parentNode) this.overlay.parentNode.removeChild(this.overlay);
         if (this.btn && this.btn.parentNode) this.btn.parentNode.removeChild(this.btn);
+        this.destroyDeform();
     }, this);
 };
 
@@ -138,32 +172,10 @@ BlobTrack.prototype.refreshButton = function () {
     this.btn.classList.toggle('on', !!bl.enabled);
 };
 
-// Analizza un nuovo frame della webcam e restituisce i blob (in uv del video, 0..1, gia specchiati)
-BlobTrack.prototype.findBlobs = function (video) {
-    var cfg = this.detect;
-    var w = Math.max(16, Math.round(cfg.resolution));
-    var h = Math.max(12, Math.round(w * video.videoHeight / Math.max(1, video.videoWidth)));
-    if (this.small.width !== w || this.small.height !== h) {
-        this.small.width = w; this.small.height = h;
-        this.prevLuma = null;
-    }
-    var ctx = this.sctx;
-    ctx.save();
-    ctx.setTransform(-1, 0, 0, 1, w, 0);         // specchiato, come l'anteprima
-    ctx.drawImage(video, 0, 0, w, h);
-    ctx.restore();
-    var px = ctx.getImageData(0, 0, w, h).data;
-    var n = w * h;
-    var luma = new Float32Array(n);
-    for (var i = 0, j = 0; i < n; i++, j += 4) luma[i] = (px[j] * 0.299 + px[j + 1] * 0.587 + px[j + 2] * 0.114) / 255;
-    var prev = this.prevLuma;
-    this.prevLuma = luma;
-    if (!prev) return [];
-
-    // maschera dei pixel cambiati
-    var thr = cfg.threshold;
-    var mask = new Uint8Array(n);
-    for (var k = 0; k < n; k++) mask[k] = Math.abs(luma[k] - prev[k]) > thr ? 1 : 0;
+// ---------- Componenti connesse su una maschera (0/1) ----------
+// Restituisce i blob in coordinate 0..1 della maschera (y verso il basso).
+BlobTrack.prototype.components = function (mask, w, h) {
+    var cfg = this.detect, n = w * h;
     // piccola dilatazione: unisce pezzi vicini dello stesso oggetto
     var dil = new Uint8Array(n);
     for (var y = 0; y < h; y++) {
@@ -178,7 +190,6 @@ BlobTrack.prototype.findBlobs = function (video) {
             }
         }
     }
-    // componenti connesse (flood fill); l'area conta solo i pixel davvero cambiati
     var label = new Int32Array(n);
     var stack = new Int32Array(n);
     var blobs = [];
@@ -203,6 +214,90 @@ BlobTrack.prototype.findBlobs = function (video) {
     blobs.sort(function (a, b) { return b.area - a.area; });
     return blobs.slice(0, Math.max(1, Math.round(this.blobs.count)));
 };
+
+// ---------- Sorgente 1: movimento della webcam (in uv del video, gia specchiato) ----------
+BlobTrack.prototype.findWebcamBlobs = function (video) {
+    var cfg = this.detect;
+    var w = Math.max(16, Math.round(cfg.resolution));
+    var h = Math.max(12, Math.round(w * video.videoHeight / Math.max(1, video.videoWidth)));
+    if (this.small.width !== w || this.small.height !== h) {
+        this.small.width = w; this.small.height = h;
+        this.prevLuma = null;
+    }
+    var ctx = this.sctx;
+    ctx.save();
+    ctx.setTransform(-1, 0, 0, 1, w, 0);         // specchiato, come l'anteprima
+    ctx.drawImage(video, 0, 0, w, h);
+    ctx.restore();
+    var px = ctx.getImageData(0, 0, w, h).data;
+    var n = w * h;
+    var luma = new Float32Array(n);
+    for (var i = 0, j = 0; i < n; i++, j += 4) luma[i] = (px[j] * 0.299 + px[j + 1] * 0.587 + px[j + 2] * 0.114) / 255;
+    var prev = this.prevLuma;
+    this.prevLuma = luma;
+    if (!prev) return [];
+    var thr = cfg.threshold;
+    var mask = new Uint8Array(n);
+    for (var k = 0; k < n; k++) mask[k] = Math.abs(luma[k] - prev[k]) > thr ? 1 : 0;
+    return this.components(mask, w, h);
+};
+
+// ---------- Sorgente 2: deformazione del logo (in uv dello schermo, y verso il basso) ----------
+BlobTrack.prototype.destroyDeform = function () {
+    if (this.dRT) { this.dRT.destroy(); this.dTex.destroy(); }
+    this.dRT = null; this.dTex = null;
+};
+
+BlobTrack.prototype.runDeform = function (dm) {
+    var dev = this.app.graphicsDevice;
+    var w = Math.max(16, Math.round(this.detect.resolution));
+    var h = Math.max(12, Math.round(w * dev.height / Math.max(1, dev.width)));
+    if (!this.dRT || this.dW !== w || this.dH !== h) {
+        this.destroyDeform();
+        this.dW = w; this.dH = h;
+        this.dTex = new pc.Texture(dev, {
+            width: w, height: h, format: pc.PIXELFORMAT_RGBA8, mipmaps: false,
+            minFilter: pc.FILTER_NEAREST, magFilter: pc.FILTER_NEAREST,
+            addressU: pc.ADDRESS_CLAMP_TO_EDGE, addressV: pc.ADDRESS_CLAMP_TO_EDGE
+        });
+        this.dRT = new pc.RenderTarget({ colorBuffer: this.dTex, depth: false });
+        this.dData = null;
+    }
+    if (!this.shDiff) this.shDiff = dm.makeShader('btDiff', BlobTrack.FS_DIFF);
+    if (!dm.moshA || !dm.logoTex) return;
+    dm.setU('uBtMosh', dm.moshA.tex);
+    dm.setU('uBtLogo', dm.logoTex);
+    dm.setU('uBtCell', [1 / w, 1 / h]);
+    dm.setU('uBtThresh', this.detect.deformThreshold);
+    pc.drawQuadWithShader(dev, this.dRT, this.shDiff);
+
+    // lettura della mappa (asincrona: arriva un frame o due dopo)
+    if (this.dPending || !this.dTex.read) return;
+    this.dPending = true;
+    var self = this, tw = w, th = h;
+    this.dTex.read(0, 0, w, h, { renderTarget: this.dRT }).then(function (data) {
+        self.dPending = false;
+        if (self.dead || tw !== self.dW || th !== self.dH) return;
+        self.dData = data;
+        self.dNew = true;
+    }).catch(function () {
+        self.dPending = false;
+    });
+};
+
+BlobTrack.prototype.findDeformBlobs = function () {
+    var w = this.dW, h = this.dH, data = this.dData;
+    var n = w * h;
+    var mask = new Uint8Array(n);
+    // la texture ha la riga 0 in basso: la ribalto (y verso il basso come lo schermo)
+    for (var y = 0; y < h; y++) {
+        var src = (h - 1 - y) * w * 4, dst = y * w;
+        for (var x = 0; x < w; x++) mask[dst + x] = data[src + x * 4] > 60 ? 1 : 0;
+    }
+    return this.components(mask, w, h);
+};
+
+// ---------- Tracking ----------
 
 // Aggancia i blob nuovi a quelli gia seguiti (il piu vicino), crea i nuovi
 BlobTrack.prototype.track = function (found) {
@@ -285,10 +380,10 @@ BlobTrack.prototype.update = function (dt) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
 
-    var bl = this.blobs;
+    var bl = this.blobs, cfg = this.detect;
     var dm = this.entity.script && this.entity.script.datamosh;
     if (!bl.enabled || !dm) { this.tracks.length = 0; this.mt = null; return; }
-    var lb = this.labels, hold = this.detect.hold;
+    var lb = this.labels, hold = cfg.hold;
     var k = bl.smoothing > 0 ? 1 - Math.exp(-dt / bl.smoothing) : 1;
     var minS = Math.min(bl.minSize, bl.maxSize), maxS = Math.max(bl.minSize, bl.maxSize);
 
@@ -305,19 +400,35 @@ BlobTrack.prototype.update = function (dt) {
     ctx.font = lb.fontSize + 'px ' + lb.font;
     ctx.textBaseline = 'top';
 
-    // ---- blob della webcam ----
-    var video = dm.camReady && dm.video;
-    if (video && video.readyState >= 2) {
-        // analisi solo quando arriva un frame nuovo
-        if (video.currentTime !== this.lastVideoTime) {
-            this.lastVideoTime = video.currentTime;
-            this.track(this.findBlobs(video));
+    // ---- blob della webcam oppure della deformazione del logo ----
+    var narrow = cw <= cfg.breakpoint;
+    var useDeform = narrow ? cfg.deformOnMobile !== false : !!cfg.deformOnDesktop;
+    var mode = useDeform ? 'deform' : 'webcam';
+    if (mode !== this.mode) { this.mode = mode; this.tracks.length = 0; this.prevLuma = null; }
+    var sx = 1, sy = 1, have = false;
+    if (mode === 'deform') {
+        this.runDeform(dm);
+        if (this.dNew && this.dData) {
+            this.dNew = false;
+            this.track(this.findDeformBlobs());
         }
-        // la webcam copre lo schermo (come background-size: cover): da uv del video a pixel
-        var vA = video.videoWidth / Math.max(1, video.videoHeight), sA = cw / ch;
-        var sx = 1, sy = 1;
-        if (sA > vA) sy = vA / sA; else sx = sA / vA;
+        have = true;                              // coordinate gia dello schermo
+    } else {
+        var video = dm.camReady && dm.video;
+        if (video && video.readyState >= 2) {
+            // analisi solo quando arriva un frame nuovo
+            if (video.currentTime !== this.lastVideoTime) {
+                this.lastVideoTime = video.currentTime;
+                this.track(this.findWebcamBlobs(video));
+            }
+            // la webcam copre lo schermo (come background-size: cover): da uv del video a pixel
+            var vA = video.videoWidth / Math.max(1, video.videoHeight), sA = cw / ch;
+            if (sA > vA) sy = vA / sA; else sx = sA / vA;
+            have = true;
+        }
+    }
 
+    if (have) {
         var tracks = this.tracks;
         for (var i = tracks.length - 1; i >= 0; i--) {
             var t = tracks[i];
