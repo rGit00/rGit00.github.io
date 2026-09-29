@@ -8,8 +8,9 @@
 //  - schermi stretti (telefono): dalla DEFORMAZIONE del logo, cioe' dove
 //    l'immagine del datamosh e' diversa dal logo pulito (la webcam del telefono
 //    fa troppo rumore). Si puo usare anche sul computer con un'opzione.
-// In piu, un blob agganciato al mouse: compare quando il mouse si muove ed e'
-// tanto piu grande quanto piu il mouse va veloce.
+// In piu, un blob agganciato al mouse (o al dito): compare quando si muove ed e'
+// tanto piu grande quanto piu va veloce. Sul telefono compare da solo: mentre
+// c'e' lui gli altri blob non si vedono (opzione anche per il computer).
 // Usa la webcam, il mouse e le immagini dello script datamosh sulla stessa entita.
 // Pulsante "Blob" in alto a sinistra (sotto "Invert") per accenderli e spegnerli.
 //
@@ -39,9 +40,11 @@ BlobTrack.attributes.add('blobs', {
 });
 
 BlobTrack.attributes.add('mouseBlob', {
-    type: 'json', title: 'Blob del mouse',
+    type: 'json', title: 'Blob del mouse / tocco',
     schema: [
         { name: 'enabled', type: 'boolean', default: true, title: 'Attivo' },
+        { name: 'aloneOnMobile', type: 'boolean', default: true, title: 'Sugli schermi stretti compare da solo (nasconde gli altri blob)' },
+        { name: 'aloneOnDesktop', type: 'boolean', default: false, title: 'Anche sul computer compare da solo' },
         { name: 'speedForMax', type: 'number', default: 1.5, min: 0.05, max: 10, precision: 2, title: 'Velocita per il mirino piu grande (schermi al secondo)' },
         { name: 'minSpeed', type: 'number', default: 0.05, min: 0, max: 2, precision: 3, title: 'Velocita minima per farlo comparire' },
         { name: 'hold', type: 'number', default: 0.4, min: 0, max: 5, precision: 2, title: 'Quanto resta quando il mouse si ferma (s)' },
@@ -380,12 +383,13 @@ BlobTrack.prototype.update = function (dt) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
 
-    var bl = this.blobs, cfg = this.detect;
+    var bl = this.blobs, cfg = this.detect, mb = this.mouseBlob;
     var dm = this.entity.script && this.entity.script.datamosh;
     if (!bl.enabled || !dm) { this.tracks.length = 0; this.mt = null; return; }
     var lb = this.labels, hold = cfg.hold;
     var k = bl.smoothing > 0 ? 1 - Math.exp(-dt / bl.smoothing) : 1;
     var minS = Math.min(bl.minSize, bl.maxSize), maxS = Math.max(bl.minSize, bl.maxSize);
+    var narrow = cw <= cfg.breakpoint;
 
     // sfarfallio delle ultime cifre
     var flick = false;
@@ -400,8 +404,36 @@ BlobTrack.prototype.update = function (dt) {
     ctx.font = lb.fontSize + 'px ' + lb.font;
     ctx.textBaseline = 'top';
 
+    // ---- stato del blob del mouse / tocco (prima, per sapere se deve stare da solo) ----
+    var mouseAlpha = 0;
+    if (mb.enabled && dm.mouse && dm.mouse.enabled) {
+        var aspect = cw / ch;
+        var speed = Math.sqrt(dm.mVelX * dm.mVelX * aspect * aspect + dm.mVelY * dm.mVelY);   // altezze dello schermo al secondo
+        var moving = dm.hasMouse && speed > mb.minSpeed;
+        var m = this.mt;
+        var ks = mb.sizeSmoothing > 0 ? 1 - Math.exp(-dt / mb.sizeSmoothing) : 1;
+        if (moving) {
+            if (!m) m = this.mt = { id: this.newId(), s: 0, born: this.time, last: this.time, jit: [0.5, 0.5, 0.5] };
+            m.last = this.time;
+            var ts = Math.pow(Math.min(1, speed / Math.max(mb.speedForMax, 0.01)), bl.sizeCurve);
+            m.s += (ts - m.s) * ks;
+        } else if (m) {
+            // da fermo si restringe piano verso la misura minima
+            m.s += (0 - m.s) * ks;
+        }
+        if (m) {
+            var mg = this.time - m.last;
+            if (mg > mb.hold + 0.25) this.mt = null;
+            else mouseAlpha = Math.min(1, (this.time - m.born) / 0.1) * (mg > mb.hold ? Math.max(0, 1 - (mg - mb.hold) / 0.25) : 1);
+        }
+    } else {
+        this.mt = null;
+    }
+    // da solo: mentre c'e' il blob del mouse / tocco, gli altri non si vedono
+    var alone = narrow ? mb.aloneOnMobile !== false : !!mb.aloneOnDesktop;
+    var othersAlpha = alone && this.mt ? 1 - mouseAlpha : 1;
+
     // ---- blob della webcam oppure della deformazione del logo ----
-    var narrow = cw <= cfg.breakpoint;
     var useDeform = narrow ? cfg.deformOnMobile !== false : !!cfg.deformOnDesktop;
     var mode = useDeform ? 'deform' : 'webcam';
     if (mode !== this.mode) { this.mode = mode; this.tracks.length = 0; this.prevLuma = null; }
@@ -436,57 +468,34 @@ BlobTrack.prototype.update = function (dt) {
             t.x += (t.tx - t.x) * k; t.y += (t.ty - t.y) * k;
             t.a += (t.ta - t.a) * k;
         }
-        for (var j = 0; j < tracks.length; j++) {
-            var tr = tracks[j];
-            var fadeIn = Math.min(1, (this.time - tr.born) / 0.15);
-            var gone = this.time - tr.lastSeen;
-            var fadeOut = gone > hold ? Math.max(0, 1 - (gone - hold) / 0.25) : 1;
-            var a = fadeIn * fadeOut;
-            if (a <= 0) continue;
-            if (flick) tr.jit = [Math.random(), Math.random(), Math.random()];
-            var st = Math.min(1, Math.max(0, tr.a / Math.max(bl.bigArea, 1e-4)));
-            var size = minS + (maxS - minS) * Math.pow(st, bl.sizeCurve);
-            this.drawBlob(ctx, cw,
-                (0.5 + (tr.x - 0.5) / sx) * cw, (0.5 + (tr.y - 0.5) / sy) * ch, size, a,
-                tr.id, tr.x, 1 - tr.y, tr.a, tr.jit, lineCol, txtCol);
+        if (othersAlpha > 0.001) {
+            for (var j = 0; j < tracks.length; j++) {
+                var tr = tracks[j];
+                var fadeIn = Math.min(1, (this.time - tr.born) / 0.15);
+                var gone = this.time - tr.lastSeen;
+                var fadeOut = gone > hold ? Math.max(0, 1 - (gone - hold) / 0.25) : 1;
+                var a = fadeIn * fadeOut * othersAlpha;
+                if (a <= 0) continue;
+                if (flick) tr.jit = [Math.random(), Math.random(), Math.random()];
+                var st = Math.min(1, Math.max(0, tr.a / Math.max(bl.bigArea, 1e-4)));
+                var size = minS + (maxS - minS) * Math.pow(st, bl.sizeCurve);
+                this.drawBlob(ctx, cw,
+                    (0.5 + (tr.x - 0.5) / sx) * cw, (0.5 + (tr.y - 0.5) / sy) * ch, size, a,
+                    tr.id, tr.x, 1 - tr.y, tr.a, tr.jit, lineCol, txtCol);
+            }
         }
     } else {
         this.tracks.length = 0;
     }
 
-    // ---- blob agganciato al mouse ----
-    var mb = this.mouseBlob;
-    if (mb.enabled && dm.mouse && dm.mouse.enabled) {
-        var aspect = cw / ch;
-        var speed = Math.sqrt(dm.mVelX * dm.mVelX * aspect * aspect + dm.mVelY * dm.mVelY);   // altezze dello schermo al secondo
-        var moving = dm.hasMouse && speed > mb.minSpeed;
-        var m = this.mt;
-        if (moving) {
-            if (!m) m = this.mt = { id: this.newId(), s: 0, born: this.time, last: this.time, jit: [0.5, 0.5, 0.5] };
-            m.last = this.time;
-            var ts = Math.pow(Math.min(1, speed / Math.max(mb.speedForMax, 0.01)), bl.sizeCurve);
-            var ks = mb.sizeSmoothing > 0 ? 1 - Math.exp(-dt / mb.sizeSmoothing) : 1;
-            m.s += (ts - m.s) * ks;
-        } else if (m) {
-            // da fermo si restringe piano verso la misura minima
-            var ks2 = mb.sizeSmoothing > 0 ? 1 - Math.exp(-dt / mb.sizeSmoothing) : 1;
-            m.s += (0 - m.s) * ks2;
-        }
-        if (m) {
-            var mg = this.time - m.last;
-            if (mg > mb.hold + 0.25) {
-                this.mt = null;
-            } else {
-                var ma = Math.min(1, (this.time - m.born) / 0.1) * (mg > mb.hold ? Math.max(0, 1 - (mg - mb.hold) / 0.25) : 1);
-                if (flick) m.jit = [Math.random(), Math.random(), Math.random()];
-                var mcol = mb.ownColor ? BlobTrack.toCss(mb.color, bl.opacity) : lineCol;
-                this.drawBlob(ctx, cw,
-                    dm.mouseU * cw, (1 - dm.mouseV) * ch, minS + (maxS - minS) * m.s, ma,
-                    m.id, dm.mouseU, dm.mouseV, m.s, m.jit, mcol, txtCol);
-            }
-        }
-    } else {
-        this.mt = null;
+    // ---- disegno del blob del mouse / tocco ----
+    var mt = this.mt;
+    if (mt && mouseAlpha > 0) {
+        if (flick) mt.jit = [Math.random(), Math.random(), Math.random()];
+        var mcol = mb.ownColor ? BlobTrack.toCss(mb.color, bl.opacity) : lineCol;
+        this.drawBlob(ctx, cw,
+            dm.mouseU * cw, (1 - dm.mouseV) * ch, minS + (maxS - minS) * mt.s, mouseAlpha,
+            mt.id, dm.mouseU, dm.mouseV, mt.s, mt.jit, mcol, txtCol);
     }
     ctx.globalAlpha = 1;
 };
